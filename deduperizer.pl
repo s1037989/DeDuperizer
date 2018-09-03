@@ -9,6 +9,7 @@ use constant;
 BEGIN {
   GetOptions (
     debug    => \(my $debug    = 0),
+    dedup    => \(my $dedup    = 0),
     help     => \(my $help     = 0),
     human    => \(my $human    = 0),
     progress => \(my $progress = 0),
@@ -16,10 +17,10 @@ BEGIN {
   );
 
   constant->import( DEBUG => $debug );
+  constant->import( DEDUP => $dedup );
   constant->import( HELP  => $help  );
   constant->import( HUMAN => $human );
   constant->import( QUICK => $quick );
-
   constant->import( PROGRESS => $progress ? eval <<'  END' : 0 );
     use Progress::Any;
     use Progress::Any::Output;
@@ -30,7 +31,7 @@ BEGIN {
 
 use File::Next;
 use File::Map 'map_file';
-use Digest::xxHash 'xxhash';
+use Digest::xxHash 'xxhash32';
 
 sub get_files_by_inode {
   my $target = shift;
@@ -63,7 +64,7 @@ sub hash_file {
   my ($file, $size) = @_;
   return '' unless $size;
   map_file my $map, $file, '<';
-  my $hash = xxhash($map, 0);
+  my $hash = xxhash32($map, 0);
   warn "Hashed: $file ==> $hash\n" if DEBUG;
   return $hash;
 }
@@ -97,9 +98,10 @@ Options:
 --human     Dump the information using Data::Printer
 --progress  Show a progress bar while processing
 --quick     Use a faster heuristic, may have false positives
+--dedup     Remove all but one file in a set and recreate them as hard links
 END
 
-  exit $state || 0;
+  exit ($state || 0);
 }
 
 usage(0) if HELP;
@@ -120,7 +122,8 @@ my $progress;
 if (PROGRESS) {
   my $njobs;
   $njobs += scalar @$_ for values %$sizes;
-  $progress = Progress::Any->get_indicator(target => $njobs);
+  $progress = Progress::Any->get_indicator(task => '');
+  $progress->target($njobs);
 }
 
 my %candidates;
@@ -148,9 +151,9 @@ my @candidates =
 
 if (HUMAN) {
   require Data::Printer;
-  Data::Printer::p( @candidates );
-  say 'Total sets ' . @candidates;
-  my $num;
+  Data::Printer::p( \@candidates );
+  say 'Total sets: ' . @candidates;
+  my $num = 0;
   $num += scalar @$_ for @candidates;
   say "Total files: $num";
 } else {
@@ -158,4 +161,14 @@ if (HUMAN) {
   say @$_ for @candidates;
 }
 
-
+if ( DEDUP ) {
+  warn "Deduperizing\n" if DEBUG;
+  my $dedup = 0;
+  foreach my $n ( @candidates ) {
+    my ($first, @others) = @$n;
+    $dedup += scalar @others;
+    unlink $_ for @others;
+    link $first, $_ for @others;
+  }
+  say "Converted $dedup files to hardlinks";
+}
